@@ -321,3 +321,5 @@ kubectl label node vm-gone-bsi-devops-worker-k8s-1 node-role.kubernetes.io/worke
 kubectl label node vm-gone-bsi-devops-worker-k8s-2 node-role.kubernetes.io/worker=
 kubectl label node vm-gone-bsi-devops-worker-k8s-3 node-role.kubernetes.io/worker=
 ```
+
+![Alt text](nodes.png)
