@@ -1,5 +1,6 @@
 # INSTALLATION KUBERNETES MULTI MASTER FOR DEVOPS
-install kubernetes multimaster Ubuntu 20.04 LTS
+install kubernetes multimaster Ubuntu 22.04 LTS
+This steps run in GCP and using internal DNS of GCE
 
 # ARSITEKTUR (TOPOLOGI)
 
@@ -20,33 +21,10 @@ hostnamectl set-hostname {hostname}
 | `worker-02` | `10.10.90.56` | Worker                                     |
 | `worker-03` | `10.10.90.57` | Worker                                     |
 
-## set preverse hostname (do all node)
-**preserve_hostname** adalah opsi atau pengaturan yang digunakan dalam konfigurasi beberapa distribusi Linux, terutama dalam file konfigurasi **/etc/cloud/cloud.cfg**. Pengaturan ini dapat memiliki nilai true atau false dan mempengaruhi cara hostname sistem dihandle selama proses boot atau provisioning.
-
-Ketika **preserve_hostname** diatur sebagai true, itu berarti sistem akan mempertahankan hostname yang sudah ditetapkan secara manual atau yang diberikan selama proses konfigurasi. Dengan kata lain, meskipun ada konfigurasi atau otomatisasi yang mencoba mengubah hostname selama proses boot, sistem akan mempertahankan nilai hostname yang sudah ada.
-
-Jika preserve_hostname diatur sebagai false, maka sistem dapat mengganti hostname selama proses boot jika ada konfigurasi atau skrip yang mencoba mengatur hostname baru.
-```bash
-nano /etc/cloud/cloud.cfg
-```
-search **preserve_hostname** and set *true*</br></br>
-preserve_hostname : true
 
 ## set time (do all node)
 ```bash
 timedatectl set-timezone Asia/Jakarta
-```
-## set domain local (do all node)
-```bash
-nano /etc/hosts
-
-  10.10.90.51 lb-master
-  10.10.90.52 master-01
-  10.10.90.53 master-02
-  10.10.90.54 master-03
-  10.10.90.55 worker-01
-  10.10.90.56 worker-02
-  10.10.90.57 worker-03
 ```
 
 ## install and set up haproxy for kube api master
@@ -64,8 +42,43 @@ vim /etc/haproxy/haproxy.cfg
 change and add your configuration like bellow
 
 ```bash
+global
+	log /dev/log	local0
+	log /dev/log	local1 notice
+	chroot /var/lib/haproxy
+	stats socket /run/haproxy/admin.sock mode 660 level admin
+	stats timeout 30s
+	user haproxy
+	group haproxy
+	daemon
+
+	# Default SSL material locations
+	ca-base /etc/ssl/certs
+	crt-base /etc/ssl/private
+
+	# See: https://ssl-config.mozilla.org/#server=haproxy&server-version=2.0.3&config=intermediate
+        ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384
+        ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
+        ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
+
+defaults
+	log	global
+	mode	http
+	option	httplog
+	option	dontlognull
+        timeout connect 5000
+        timeout client  50000
+        timeout server  50000
+	errorfile 400 /etc/haproxy/errors/400.http
+	errorfile 403 /etc/haproxy/errors/403.http
+	errorfile 408 /etc/haproxy/errors/408.http
+	errorfile 500 /etc/haproxy/errors/500.http
+	errorfile 502 /etc/haproxy/errors/502.http
+	errorfile 503 /etc/haproxy/errors/503.http
+	errorfile 504 /etc/haproxy/errors/504.http
+
 listen stats
-  bind    lb-cluster:9000
+  bind    *:9000
   mode    http
   stats   enable
   stats   hide-version
@@ -74,27 +87,19 @@ listen stats
   stats   realm     Haproxy\ Statistics
   stats   auth      Admin:Password
 
-#---------------------------------------------------------------------
-# apiserver frontend which proxys to the control plane nodes
-#---------------------------------------------------------------------
-frontend apiserver
-    bind lb-cluster:6443
-    mode tcp
-    option tcplog
-    default_backend apiserver
+frontend kubernetes
+        bind *:6443
+        option tcplog
+        mode tcp
+        default_backend kubernetes-master-nodes
 
-#---------------------------------------------------------------------
-# round robin balancing for apiserver
-#---------------------------------------------------------------------
-backend apiserver
-    option httpchk GET /healthz
-    http-check expect status 200
-    mode tcp
-    option ssl-hello-chk
-    balance     roundrobin
-        server master-01 master-01:6443 check
-        server master-02 master-02:6443 check
-        server master-03 master-03:6443 check
+backend kubernetes-master-nodes
+        mode tcp
+        balance roundrobin
+        option tcp-check
+        server vm-gone-bsi-devops-master-k8s-1.asia-southeast2-a.c.poc-testinglab.internal 10.1.2.26:6443 check fall 3 rise 2
+        server vm-gone-bsi-devops-master-k8s-2.asia-southeast2-b.c.poc-testinglab.internal 10.1.2.27:6443 check fall 3 rise 2
+        server vm-gone-bsi-devops-master-k8s-3.asia-southeast2-c.c.poc-testinglab.internal 10.1.2.28:6443 check fall 3 rise 2
 
 ```
 - makesure your configuration is valid check with command bellow
@@ -115,115 +120,60 @@ nc -vvvv lb-cluster 6443
 
 # K8S INSTALLATION (DO ALL MASTER AND WORKER)
 
-## update repository
+## update & upgrade repository
 ```bash
-apt update
+sudo apt-get update
+sudo apt-get upgrade
 ```
-## install https Transport
+## disable swap
 ```bash
-apt install curl apt-transport-https -y
+sudo swapoff -a
+sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 ```
-## add api-key official k8s from google
+## add kernel parameter
 ```bash
-mkdir -p /etc/apt/keyrings/
-
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-
-```
-## add repository k8s to source list ubuntu
-```bash
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
-```
-## update repository just added
-```bash
-apt update
-```
-## install kubectl kubeadm kubelet spceific version (v1.25)
-```bash
-apt install -y kubeadm=1.28.1-1.1 kubelet=1.28.1-1.1 kubectl=1.28.1-1.1 
-```
-## hold all service to keep version 
-```bash
-apt-mark hold kubelet kubeadm kubectl
-```
-## System linux configuration ###
-### comment swap in fstab
-```bash
-nano /etc/fstab
-``` 
-- comment swap.img
-
-```bash
-# /etc/fstab: static file system information.
-#
-# Use 'blkid' to print the universally unique identifier for a
-# device; this may be used with UUID= as a more robust way to name devices
-# that works even if disks are added and removed. See fstab(5).
-#
-# <file system> <mount point>   <type>  <options>       <dump>  <pass>
-# / was on /dev/ubuntu-vg/ubuntu-lv during curtin installation
-/dev/disk/by-id/dm-uuid-LVM-97dj8w1JiawUrjPxBSMmOPPQAcxCp0Unxd76ijKb4JTNISA31NTokVogkj9nr9uZ / ext4 defaults 0 1
-# /boot was on /dev/sda2 during curtin installation
-/dev/disk/by-uuid/20b8e0ca-52b3-44dd-bcec-26609d5746d1 /boot ext4 defaults 0 1
-#/swap.img      none    swap    sw      0       0
-
-## set off swap
-```
-## set swapoff
-```bash
-swapoff -a 
-mount -a
-```
-  
-## set layer file system
-```bash
-modprobe overlay
-```
-## set network bridge
-```bash
-modprobe br_netfilter
-```
-## set config layer file system
-```bash
-tee /etc/modules-load.d/k8s.conf <<EOF
+sudo tee /etc/modules-load.d/containerd.conf <<EOF
 overlay
 br_netfilter
 EOF
 ```
-## set config bridge network k8s
+## set layer file system and network bridge
 ```bash
-tee /etc/sysctl.d/kubernetes.conf<<EOF
+sudo modprobe overlay
+sudo modprobe br_netfilter
+```
+
+```bash
+sudo tee /etc/sysctl.d/kubernetes.conf <<EOF
 net.bridge.bridge-nf-call-ip6tables = 1
 net.bridge.bridge-nf-call-iptables = 1
 net.ipv4.ip_forward = 1
 EOF
 ```
-
-## apply system bridge and layer
+## reload the system
 ```bash
-sysctl --system
+sudo sysctl --system
 ```
+
 # INSTALLATION CONTAINERD (DO ALL MASTER AND WORKER)
 ## add denpedencies and install ca certificate
 ```bash
-apt install -y gnupg2 software-properties-common ca-certificates
+sudo apt install -y curl gnupg2 software-properties-common apt-transport-https ca-certificates
 ```
 ## add official repository
 ```bash
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmour -o /etc/apt/trusted.gpg.d/docker.gpg
+sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
 ```
 ## install containerd
 ```bash
-apt install -y containerd.io
+sudo apt update
+sudo apt install -y containerd.io
 ```
 ## make directory config
 ```bash
-mkdir -p /etc/containerd
-```
-## add config default containerd
-```bash
-containerd config default > /etc/containerd/config.toml
+containerd config default | sudo tee /etc/containerd/config.toml >/dev/null 2>&1
+sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml
 ```
 ## restart and enable service containerd
 ```bash
@@ -232,7 +182,32 @@ systemctl enable containerd
 systemctl status containerd
 ```
 
-# INITIAL MASTER (CONTROL PLANE)
+# Install K8S Components
+## add k8s signing key and repository
+```bash
+sudo apt-get update
+# apt-transport-https may be a dummy package; if so, you can skip that package
+sudo apt-get install -y apt-transport-https ca-certificates curl gpg
+
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+# This overwrites any existing configuration in /etc/apt/sources.list.d/kubernetes.list
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+```
+## update the package list
+```bash
+apt update
+```
+## install kubectl kubeadm kubelet spceific version (v1.25)
+```bash
+sudo apt-get install -y kubelet kubeadm kubectl
+```
+## hold all service to keep version 
+```bash
+apt-mark hold kubelet kubeadm kubectl
+```
+
+# INITIAL MASTER NODE AND INSTALL CNI (CALICO)
 
 ## pull kubernetes image
 ```bash
@@ -244,7 +219,7 @@ kubeadm init phase preflight
 ```
 ## init Master (only do in one Master node recommend on master-01)
 ```bash
-kubeadm init --control-plane-endpoint="lb-master:6443" --upload-certs --pod-network-cidr=172.16.0.0/16
+kubeadm init --control-plane-endpoint="10.1.2.24:6443" --upload-certs --pod-network-cidr=172.16.0.0/16
 ```
 ```bash
 Result 
@@ -267,8 +242,8 @@ Run "kubectl apply -f [podnetwork].yaml" with one of the options listed at:
 
 You can now join any number of the control-plane node running the following command on each as root:
 
-  kubeadm join lb-master:6443 --token qm8e6s.fg21m2eijz2yuybi \
-        --discovery-token-ca-cert-hash sha256:06ff052ecf66ff5953793daa7625e1ae59352528e2ca72813d4e4e724234a7ea \
+  kubeadm join 10.1.2.24:6443 --token qm8e6s.fg21m2eijz2yuybi \
+        --discovery-token-ca-cert-hash sha256:{{your_sha}} \
         --control-plane --certificate-key 60909e661e90bbb71004df24462d93dc869f3b493c119166e5e4921fc37e5356
 
 Please note that the certificate-key gives access to cluster sensitive data, keep it secret!
@@ -277,8 +252,8 @@ As a safeguard, uploaded-certs will be deleted in two hours; If necessary, you c
 
 Then you can join any number of worker nodes by running the following on each as root:
 
-kubeadm join lb-master:6443 --token qm8e6s.fg21m2eijz2yuybi \
-        --discovery-token-ca-cert-hash sha256:06ff052ecf66ff5953793daa7625e1ae59352528e2ca72813d4e4e724234a7ea
+kubeadm join 10.1.2.24:6443 --token qm8e6s.fg21m2eijz2yuybi \
+        --discovery-token-ca-cert-hash sha256:{{your_sha}}
 ```
 ## add kubeconfig admin 
 ```bash
@@ -287,6 +262,28 @@ sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
 ```
 check node by *kubectl get node*
+
+## install calico
+```bash
+kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.1/manifests/tigera-operator.yaml
+curl https://raw.githubusercontent.com/projectcalico/calico/v3.28.1/manifests/custom-resources.yaml -O
+sed -i 's/cidr: 192\.168\.0\.0\/16/cidr: 172.16.0.0\/16/g' custom-resources.yaml
+kubectl create -f custom-resources.yaml
+```
+
+## alternative way to install calico
+```bash
+kubectl apply -f https://docs.projectcalico.org/v3.23/manifests/calico.yaml
+```
+
+## notes
+Make sure to open all ports between each instance/vm and sometimes need to delete all resources and reapply
+
+## check calico pods and tigerastatus
+![Alt text](calico.png)
+```bash
+kubectl get tigerastatus -o yaml
+```
 
 # INITIAL ANOTHER MASTER OR JOINING ANOTHER MASTER (do in master-02 and master-03)
 ## pull kubernetes image
@@ -300,8 +297,8 @@ kubeadm init phase preflight
 ## init Multimaster (do in master-02 and master-03)
 ```bash
 kubeadm join lb-master:6443 --token qm8e6s.fg21m2eijz2yuybi \
-        --discovery-token-ca-cert-hash sha256:06ff052ecf66ff5953793daa7625e1ae59352528e2ca72813d4e4e724234a7ea \
-        --control-plane --certificate-key 60909e661e90bbb71004df24462d93dc869f3b493c119166e5e4921fc37e5356
+        --discovery-token-ca-cert-hash sha256:{{your_sha}} \
+        --control-plane --certificate-key {{your_certificate}}
 ```
 ## add kubeconfig admin 
 ```bash
@@ -314,24 +311,13 @@ sudo chown $(id -u):$(id -g) $HOME/.kube/config
 ## join worker
 ```bash
 kubeadm join lb-master:6443 --token qm8e6s.fg21m2eijz2yuybi \
-        --discovery-token-ca-cert-hash sha256:06ff052ecf66ff5953793daa7625e1ae59352528e2ca72813d4e4e724234a7ea
+        --discovery-token-ca-cert-hash sha256:{{your_sha}}
 ```
 
-And then you need to install Network Policy to connect the pods each other link install below
-*https://github.com/falyan/install-calico*
-
-## 🔗 About me
-[![linkedin](https://img.shields.io/badge/linkedin-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/falyan-zuril-587585247/)
-
-
-
-
-
-
-
-
-
-
-
-
-
+## tips
+you can give a label for your nodes to make it easier to identify
+```bash
+kubectl label node vm-gone-bsi-devops-worker-k8s-1 node-role.kubernetes.io/worker=
+kubectl label node vm-gone-bsi-devops-worker-k8s-2 node-role.kubernetes.io/worker=
+kubectl label node vm-gone-bsi-devops-worker-k8s-3 node-role.kubernetes.io/worker=
+```
